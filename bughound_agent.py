@@ -54,33 +54,44 @@ class BugHoundAgent:
     # Workflow steps
     # ----------------------------
     def analyze(self, code_snippet: str) -> List[Dict[str, str]]:
-        if not self._can_call_llm():
-            self._log("ANALYZE", "Using heuristic analyzer (offline mode).")
-            return self._heuristic_analyze(code_snippet)
+        heuristic_issues = self._heuristic_analyze(code_snippet)
 
-        self._log("ANALYZE", "Using LLM analyzer.")
+        if not self._can_call_llm():
+            self._log("ANALYZE", f"Heuristics found {len(heuristic_issues)} issue(s). No LLM available, using heuristic results only.")
+            return heuristic_issues
+
         system_prompt = (
             "You are BugHound, a code review assistant. "
             "Return ONLY valid JSON. No markdown, no backticks."
         )
-        user_prompt = (
-            "Analyze this Python code for potential issues. "
-            "Return a JSON array of issue objects with keys: type, severity, msg.\n\n"
-            f"CODE:\n{code_snippet}"
-        )
 
-        # UPDATED: Added exception handling for API errors/rate limits
+        if not heuristic_issues:
+            self._log("ANALYZE", "Heuristics found no issues. Calling LLM for full analysis.")
+            user_prompt = (
+                "Analyze this Python code for potential issues. "
+                "Return a JSON array of issue objects with keys: type, severity, msg.\n\n"
+                f"CODE:\n{code_snippet}"
+            )
+        else:
+            self._log("ANALYZE", f"Heuristics found {len(heuristic_issues)} issue(s). Calling LLM to refine.")
+            user_prompt = (
+                f"The following issues were already detected by static rules:\n{json.dumps(heuristic_issues)}\n\n"
+                "Please review the code and return a JSON array of ALL issues "
+                "(including refined versions of the above plus any additional ones you find).\n\n"
+                f"CODE:\n{code_snippet}"
+            )
+
         try:
             raw = self.client.complete(system_prompt=system_prompt, user_prompt=user_prompt)
-        except Exception as e:
-            self._log("ANALYZE", f"API Error: {str(e)}. Falling back to heuristics.")
-            return self._heuristic_analyze(code_snippet)
+        except Exception:
+            self._log("ANALYZE", "LLM failed or returned unparsable output. Using heuristic results.")
+            return heuristic_issues
 
         issues = self._parse_json_array_of_issues(raw)
 
         if issues is None:
-            self._log("ANALYZE", "LLM output was not parseable JSON. Falling back to heuristics.")
-            return self._heuristic_analyze(code_snippet)
+            self._log("ANALYZE", "LLM failed or returned unparsable output. Using heuristic results.")
+            return heuristic_issues
 
         return issues
 
